@@ -1,5 +1,108 @@
 import httpx
 import os
+import socket
+import time
+import threading
+from urllib.parse import urlparse
+from typing import Dict, Tuple, Optional, List
+
+class DNSCache:
+    """Thread-safe DNS cache with fallback support"""
+
+    def __init__(self, ttl: int = 300, fallback: bool = True):
+        self.ttl = ttl
+        self.fallback = fallback
+        self._cache: Dict[str, Tuple[List[str], float]] = {}
+        self._lock = threading.RLock()
+
+    def resolve(self, hostname: str) -> str:
+        """Resolve hostname to IP address with caching and fallback"""
+        with self._lock:
+            # Check cache first
+            if hostname in self._cache:
+                ips, timestamp = self._cache[hostname]
+                if time.time() - timestamp < self.ttl:
+                    # Cache is fresh, return first IP
+                    return ips[0] if ips else self._resolve_system(hostname)
+                elif self.fallback:
+                    # Cache is stale but we have fallback data
+                    stale_ips = ips
+                else:
+                    stale_ips = None
+            else:
+                stale_ips = None
+
+            # Try fresh DNS resolution
+            try:
+                ip = self._resolve_system(hostname)
+                # Update cache with successful resolution
+                self._cache[hostname] = ([ip], time.time())
+                return ip
+            except Exception as e:
+                # DNS resolution failed
+                if stale_ips and self.fallback:
+                    # Use stale cache as fallback
+                    return stale_ips[0]
+                # No fallback available, re-raise the exception
+                raise e
+
+    def _resolve_system(self, hostname: str) -> str:
+        """Perform system DNS resolution"""
+        return socket.gethostbyname(hostname)
+
+    def clear(self):
+        """Clear the DNS cache"""
+        with self._lock:
+            self._cache.clear()
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get cache statistics"""
+        with self._lock:
+            fresh_count = 0
+            stale_count = 0
+            current_time = time.time()
+
+            for hostname, (ips, timestamp) in self._cache.items():
+                if current_time - timestamp < self.ttl:
+                    fresh_count += 1
+                else:
+                    stale_count += 1
+
+            return {
+                'total_entries': len(self._cache),
+                'fresh_entries': fresh_count,
+                'stale_entries': stale_count
+            }
+
+class DNSCachedHTTPTransport(httpx.HTTPTransport):
+    """Custom HTTP transport with DNS caching"""
+
+    def __init__(self, dns_cache: Optional[DNSCache] = None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dns_cache = dns_cache
+
+    def handle_request(self, request):
+        """Handle request with DNS caching if enabled"""
+        if self.dns_cache and request.url.host:
+            try:
+                # Resolve hostname using DNS cache
+                cached_ip = self.dns_cache.resolve(request.url.host)
+
+                # Create new URL with resolved IP
+                original_host = request.url.host
+                url_with_ip = request.url.copy_with(host=cached_ip)
+                request = request.copy_with(url=url_with_ip)
+
+                # Add Host header to maintain proper HTTP/1.1 behavior
+                if 'host' not in request.headers:
+                    request.headers['host'] = original_host
+
+            except Exception:
+                # DNS resolution failed, proceed with original request
+                # This allows httpx to handle DNS resolution normally
+                pass
+
+        return super().handle_request(request)
 
 class Result:
     def __init__(self, response):
@@ -28,15 +131,19 @@ class Result:
         return f"CarthooksResult(success={self.success}, data={self.data}, error={self.error})"
 
 class Client:
-    def __init__(self, timeout=None, max_connections=None, max_keepalive_connections=None, http2=None):
+    def __init__(self, timeout=None, max_connections=None, max_keepalive_connections=None, http2=None,
+                 dns_cache=None, dns_cache_ttl=None, dns_fallback=None):
         """
-        Initialize Carthooks client with HTTP/2 support and connection pooling
+        Initialize Carthooks client with HTTP/2 support, connection pooling, and DNS caching
 
         Args:
             timeout: Request timeout in seconds (default: 30.0, env: CARTHOOKS_TIMEOUT)
             max_connections: Maximum number of connections in the pool (default: 100, env: CARTHOOKS_MAX_CONNECTIONS)
             max_keepalive_connections: Maximum number of keep-alive connections (default: 20, env: CARTHOOKS_MAX_KEEPALIVE_CONNECTIONS)
             http2: Enable HTTP/2 support (default: True, env: CARTHOOKS_HTTP2_DISABLED to disable)
+            dns_cache: Enable DNS caching (default: True, env: CARTHOOKS_DNS_CACHE_DISABLE to disable)
+            dns_cache_ttl: DNS cache TTL in seconds (default: 300, env: CARTHOOKS_DNS_CACHE_TTL)
+            dns_fallback: Use stale DNS cache on resolution failure (default: True, env: CARTHOOKS_DNS_FALLBACK_DISABLE to disable)
         """
         self.base_url = os.getenv('CARTHOOKS_API_URL')
         if self.base_url == None:
@@ -59,17 +166,40 @@ class Client:
             http2_disabled = os.getenv('CARTHOOKS_HTTP2_DISABLED', 'false').lower()
             http2 = not (http2_disabled in ('true', '1', 'yes', 'on'))
 
+        # DNS cache configuration
+        if dns_cache is None:
+            dns_cache_disabled = os.getenv('CARTHOOKS_DNS_CACHE_DISABLE', 'false').lower()
+            dns_cache = not (dns_cache_disabled in ('true', '1', 'yes', 'on'))
+
+        if dns_cache_ttl is None:
+            dns_cache_ttl = int(os.getenv('CARTHOOKS_DNS_CACHE_TTL', '300'))
+
+        if dns_fallback is None:
+            dns_fallback_disabled = os.getenv('CARTHOOKS_DNS_FALLBACK_DISABLE', 'false').lower()
+            dns_fallback = not (dns_fallback_disabled in ('true', '1', 'yes', 'on'))
+
         # Configure connection pool limits
         limits = httpx.Limits(
             max_connections=max_connections,
             max_keepalive_connections=max_keepalive_connections
         )
 
-        # Create HTTP client with HTTP/2 support and connection pooling
-        self.client = httpx.Client(
-            timeout=timeout,
+        # Initialize DNS cache if enabled
+        self.dns_cache = None
+        if dns_cache:
+            self.dns_cache = DNSCache(ttl=dns_cache_ttl, fallback=dns_fallback)
+
+        # Create custom transport with DNS caching
+        transport = DNSCachedHTTPTransport(
+            dns_cache=self.dns_cache,
             limits=limits,
             http2=http2
+        )
+
+        # Create HTTP client with HTTP/2 support, connection pooling, and DNS caching
+        self.client = httpx.Client(
+            timeout=timeout,
+            transport=transport
         )
 
     def setAccessToken(self, access_token):
@@ -219,4 +349,19 @@ class Client:
         """Close the client and release connection pool resources"""
         if hasattr(self, 'client'):
             self.client.close()
+
+    def clear_dns_cache(self):
+        """Clear the DNS cache"""
+        if self.dns_cache:
+            self.dns_cache.clear()
+
+    def get_dns_cache_stats(self) -> Optional[Dict[str, int]]:
+        """Get DNS cache statistics"""
+        if self.dns_cache:
+            return self.dns_cache.get_stats()
+        return None
+
+    def is_dns_cache_enabled(self) -> bool:
+        """Check if DNS cache is enabled"""
+        return self.dns_cache is not None
     
