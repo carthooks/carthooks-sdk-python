@@ -132,7 +132,7 @@ class Result:
 
 class Client:
     def __init__(self, timeout=None, max_connections=None, max_keepalive_connections=None, http2=None,
-                 dns_cache=None, dns_cache_ttl=None, dns_fallback=None):
+                 dns_cache=None, dns_cache_ttl=None, dns_fallback=None, enable_ipv6=None):
         """
         Initialize Carthooks client with HTTP/2 support, connection pooling, and DNS caching
 
@@ -144,6 +144,7 @@ class Client:
             dns_cache: Enable DNS caching (default: True, env: CARTHOOKS_DNS_CACHE_DISABLE to disable)
             dns_cache_ttl: DNS cache TTL in seconds (default: 300, env: CARTHOOKS_DNS_CACHE_TTL)
             dns_fallback: Use stale DNS cache on resolution failure (default: True, env: CARTHOOKS_DNS_FALLBACK_DISABLE to disable)
+            enable_ipv6: Enable IPv6 support (default: False, env: CARTHOOKS_ENABLE_IPV6 to enable)
         """
         self.base_url = os.getenv('CARTHOOKS_API_URL')
         if self.base_url == None:
@@ -177,6 +178,18 @@ class Client:
         if dns_fallback is None:
             dns_fallback_disabled = os.getenv('CARTHOOKS_DNS_FALLBACK_DISABLE', 'false').lower()
             dns_fallback = not (dns_fallback_disabled in ('true', '1', 'yes', 'on'))
+
+        # IPv6 configuration (default: disabled)
+        if enable_ipv6 is None:
+            enable_ipv6_env = os.getenv('CARTHOOKS_ENABLE_IPV6', 'false').lower()
+            enable_ipv6 = enable_ipv6_env in ('true', '1', 'yes', 'on')
+
+        # Force IPv4-only if IPv6 is disabled
+        if not enable_ipv6:
+            self._setup_ipv4_only()
+
+        # Store IPv6 setting for reference
+        self.ipv6_enabled = enable_ipv6
 
         # Configure connection pool limits
         limits = httpx.Limits(
@@ -364,4 +377,23 @@ class Client:
     def is_dns_cache_enabled(self) -> bool:
         """Check if DNS cache is enabled"""
         return self.dns_cache is not None
+
+    def _setup_ipv4_only(self):
+        """Force IPv4-only connections by modifying socket.getaddrinfo"""
+        import socket
+
+        # Store original getaddrinfo if not already stored
+        if not hasattr(socket, '_carthooks_original_getaddrinfo'):
+            socket._carthooks_original_getaddrinfo = socket.getaddrinfo
+
+        def ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            """Custom getaddrinfo that only returns IPv4 addresses"""
+            return socket._carthooks_original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+        # Replace system getaddrinfo with IPv4-only version
+        socket.getaddrinfo = ipv4_only_getaddrinfo
+
+    def is_ipv6_enabled(self) -> bool:
+        """Check if IPv6 is enabled"""
+        return getattr(self, 'ipv6_enabled', False)
     
