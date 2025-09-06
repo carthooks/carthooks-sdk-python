@@ -397,3 +397,40 @@ class Client:
         """Check if IPv6 is enabled"""
         return getattr(self, 'ipv6_enabled', False)
     
+    def start_watch_data(self, endpoint_url, name, app_id, collection_id, filters=None, age=432000, watch_start_time=None):
+        """
+        Start data monitoring
+        
+        Args:
+            endpoint_url: SQS queue URL
+            name: Monitoring task name
+            app_id: Application ID
+            collection_id: Collection ID
+            filters: Filter conditions (optional)
+            age: Monitoring validity period in seconds, default 5 days (5*24*3600)
+            watch_start_time: Monitoring start timestamp (optional)
+        
+        Returns:
+            Monitoring task information
+        """
+        data = {
+            "endpoint_url": endpoint_url,
+            "endpoint_type": "sqs",
+            "name": name,
+            "app_id": app_id,
+            "collection_id": collection_id,
+            "age": age
+        }
+        
+        if watch_start_time:
+            data["watch_start_time"] = watch_start_time
+            
+        if filters:
+            data["filters"] = filters
+            
+        response = self.client.post(
+            f'{self.base_url}/v1/watch-data',
+            headers=self.headers,
+            json=data
+        )
+        return Result(response)
