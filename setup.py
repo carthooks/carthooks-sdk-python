@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='carthooks',
-    version='0.1.7',
+    version='0.1.8',
     packages=find_packages(),
     description='Carthooks Python SDK',
     long_description=open('README.md').read(),
