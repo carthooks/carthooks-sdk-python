@@ -4,7 +4,64 @@ import socket
 import time
 import threading
 from urllib.parse import urlparse
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Any, Callable
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+
+# OAuth related classes and types
+
+@dataclass
+class OAuthConfig:
+    """OAuth configuration"""
+    client_id: str
+    client_secret: str
+    refresh_token: Optional[str] = None
+    auto_refresh: bool = True
+    on_token_refresh: Optional[Callable[['OAuthTokens'], None]] = None
+
+@dataclass
+class OAuthTokens:
+    """OAuth token response"""
+    access_token: str
+    token_type: str
+    expires_in: int
+    scope: str
+    refresh_token: Optional[str] = None
+
+@dataclass
+class OAuthTokenRequest:
+    """OAuth token request"""
+    grant_type: str
+    client_id: str
+    client_secret: str
+    user_access_token: Optional[str] = None
+    code: Optional[str] = None
+    redirect_uri: Optional[str] = None
+    refresh_token: Optional[str] = None
+
+@dataclass
+class OAuthAuthorizeCodeRequest:
+    """OAuth authorization code request"""
+    client_id: str
+    redirect_uri: str
+    state: str
+    target_tenant_id: Optional[int] = None
+
+@dataclass
+class OAuthAuthorizeCodeResponse:
+    """OAuth authorization code response"""
+    redirect_url: str
+
+@dataclass
+class UserInfo:
+    """Current user information"""
+    user_id: int
+    username: str
+    email: str
+    tenant_id: int
+    tenant_name: str
+    is_admin: bool
+    scope: List[str]
 
 class DNSCache:
     """Thread-safe DNS cache with fallback support"""
@@ -132,9 +189,10 @@ class Result:
 
 class Client:
     def __init__(self, timeout=None, max_connections=None, max_keepalive_connections=None, http2=None,
-                 dns_cache=None, dns_cache_ttl=None, dns_fallback=None, enable_ipv6=None):
+                 dns_cache=None, dns_cache_ttl=None, dns_fallback=None, enable_ipv6=None, 
+                 oauth_config=None, access_token=None):
         """
-        Initialize Carthooks client with HTTP/2 support, connection pooling, and DNS caching
+        Initialize Carthooks client with HTTP/2 support, connection pooling, DNS caching, and OAuth support
 
         Args:
             timeout: Request timeout in seconds (default: 30.0, env: CARTHOOKS_TIMEOUT)
@@ -145,6 +203,8 @@ class Client:
             dns_cache_ttl: DNS cache TTL in seconds (default: 300, env: CARTHOOKS_DNS_CACHE_TTL)
             dns_fallback: Use stale DNS cache on resolution failure (default: True, env: CARTHOOKS_DNS_FALLBACK_DISABLE to disable)
             enable_ipv6: Enable IPv6 support (default: False, env: CARTHOOKS_ENABLE_IPV6 to enable)
+            oauth_config: OAuth configuration (OAuthConfig instance)
+            access_token: Direct access token (alternative to OAuth, env: CARTHOOKS_ACCESS_TOKEN)
         """
         self.base_url = os.getenv('CARTHOOKS_API_URL')
         if self.base_url == None:
@@ -152,6 +212,18 @@ class Client:
         self.headers = {
             'Content-Type': 'application/json',
         }
+
+        # OAuth configuration and state
+        self.oauth_config = oauth_config
+        self.current_tokens: Optional[OAuthTokens] = None
+        self.token_expires_at: Optional[datetime] = None
+
+        # Set access token from parameter or environment
+        if access_token is None:
+            access_token = os.getenv('CARTHOOKS_ACCESS_TOKEN')
+        
+        if access_token:
+            self.setAccessToken(access_token)
 
         # Get configuration from environment variables with fallbacks
         if timeout is None:
@@ -223,6 +295,9 @@ class Client:
 
     def getItems(self, app_id, collection_id, limit=20, start=0, **options):
         """Get items from a collection with pagination"""
+        # Ensure valid token before making request
+        self.ensure_valid_token()
+        
         options['pagination[start]'] = start
         options['pagination[limit]'] = limit
         url = f'{self.base_url}/v1/apps/{app_id}/collections/{collection_id}/items'
@@ -434,3 +509,189 @@ class Client:
             json=data
         )
         return Result(response)
+
+    # OAuth Methods
+
+    def get_oauth_token(self, request: OAuthTokenRequest) -> Result:
+        """Get OAuth token using various grant types"""
+        # Use form-encoded data for OAuth token requests (OAuth 2.0 standard)
+        form_data = {
+            'grant_type': request.grant_type,
+            'client_id': request.client_id,
+            'client_secret': request.client_secret,
+        }
+        
+        if request.user_access_token:
+            form_data['user_access_token'] = request.user_access_token
+        if request.code:
+            form_data['code'] = request.code
+        if request.redirect_uri:
+            form_data['redirect_uri'] = request.redirect_uri
+        if request.refresh_token:
+            form_data['refresh_token'] = request.refresh_token
+
+        # Create headers for form request
+        form_headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json',
+        }
+
+        response = self.client.post(
+            f'{self.base_url}/open/api/oauth/token',
+            headers=form_headers,
+            data=form_data
+        )
+        
+        result = Result(response)
+        
+        # Store tokens if this is our client and request was successful
+        if result.success and self.oauth_config and request.client_id == self.oauth_config.client_id:
+            if result.data:
+                tokens = OAuthTokens(
+                    access_token=result.data.get('access_token', ''),
+                    token_type=result.data.get('token_type', 'Bearer'),
+                    expires_in=result.data.get('expires_in', 0),
+                    scope=result.data.get('scope', ''),
+                    refresh_token=result.data.get('refresh_token')
+                )
+                
+                # Store tokens and expiration time
+                self.current_tokens = tokens
+                if tokens.expires_in > 0:
+                    self.token_expires_at = datetime.now() + timedelta(seconds=tokens.expires_in)
+                
+                # Update authorization header
+                self.setAccessToken(tokens.access_token)
+                
+                # Call refresh callback if provided
+                if self.oauth_config.on_token_refresh:
+                    self.oauth_config.on_token_refresh(tokens)
+        
+        return result
+
+    def refresh_oauth_token(self, refresh_token: Optional[str] = None) -> Result:
+        """Refresh OAuth token using refresh token"""
+        if not self.oauth_config:
+            return Result(type('MockResponse', (), {
+                'json': lambda: {'error': 'OAuth configuration not provided'},
+                'text': 'OAuth configuration not provided'
+            })())
+
+        token_to_use = (
+            refresh_token or 
+            (self.oauth_config.refresh_token if self.oauth_config else None) or
+            (self.current_tokens.refresh_token if self.current_tokens else None)
+        )
+
+        if not token_to_use:
+            return Result(type('MockResponse', (), {
+                'json': lambda: {'error': 'No refresh token available'},
+                'text': 'No refresh token available'
+            })())
+
+        request = OAuthTokenRequest(
+            grant_type='refresh_token',
+            client_id=self.oauth_config.client_id,
+            client_secret=self.oauth_config.client_secret,
+            refresh_token=token_to_use
+        )
+
+        return self.get_oauth_token(request)
+
+    def initialize_oauth(self, user_access_token: Optional[str] = None) -> Result:
+        """Initialize OAuth with client credentials"""
+        if not self.oauth_config:
+            return Result(type('MockResponse', (), {
+                'json': lambda: {'error': 'OAuth configuration not provided'},
+                'text': 'OAuth configuration not provided'
+            })())
+
+        request = OAuthTokenRequest(
+            grant_type='client_credentials',
+            client_id=self.oauth_config.client_id,
+            client_secret=self.oauth_config.client_secret,
+            user_access_token=user_access_token
+        )
+
+        return self.get_oauth_token(request)
+
+    def exchange_authorization_code(self, code: str, redirect_uri: str) -> Result:
+        """Exchange authorization code for tokens"""
+        if not self.oauth_config:
+            return Result(type('MockResponse', (), {
+                'json': lambda: {'error': 'OAuth configuration not provided'},
+                'text': 'OAuth configuration not provided'
+            })())
+
+        request = OAuthTokenRequest(
+            grant_type='authorization_code',
+            client_id=self.oauth_config.client_id,
+            client_secret=self.oauth_config.client_secret,
+            code=code,
+            redirect_uri=redirect_uri
+        )
+
+        return self.get_oauth_token(request)
+
+    def get_oauth_authorize_code(self, request: OAuthAuthorizeCodeRequest) -> Result:
+        """Get OAuth authorization code (requires authentication)"""
+        data = {
+            'client_id': request.client_id,
+            'redirect_uri': request.redirect_uri,
+            'state': request.state,
+        }
+        
+        if request.target_tenant_id:
+            data['target_tenant_id'] = request.target_tenant_id
+
+        response = self.client.post(
+            f'{self.base_url}/api/oauth/get-authorize-code',
+            headers=self.headers,
+            json=data
+        )
+        return Result(response)
+
+    def get_current_user(self) -> Result:
+        """Get current user information (requires OAuth token)"""
+        response = self.client.get(
+            f'{self.base_url}/open/api/v1/me',
+            headers=self.headers
+        )
+        return Result(response)
+
+    def ensure_valid_token(self) -> bool:
+        """Check if token needs refresh and refresh if necessary"""
+        if (not self.oauth_config or 
+            not self.oauth_config.auto_refresh or 
+            not self.token_expires_at):
+            return True
+
+        # Check if token expires within 5 minutes
+        five_minutes_from_now = datetime.now() + timedelta(minutes=5)
+        if self.token_expires_at > five_minutes_from_now:
+            return True
+
+        # Try to refresh token
+        result = self.refresh_oauth_token()
+        return result.success
+
+    def get_current_tokens(self) -> Optional[OAuthTokens]:
+        """Get current OAuth tokens"""
+        return self.current_tokens
+
+    def set_oauth_config(self, config: OAuthConfig) -> None:
+        """Set OAuth configuration"""
+        self.oauth_config = config
+
+    def get_oauth_config(self) -> Optional[OAuthConfig]:
+        """Get OAuth configuration"""
+        return self.oauth_config
+
+    # Context manager support
+    def __enter__(self):
+        """Enter context manager"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager"""
+        self.close()
