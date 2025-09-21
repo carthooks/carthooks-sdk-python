@@ -4,7 +4,25 @@ Test script for DNS cache functionality
 """
 import time
 import threading
+import os
+import sys
+from dotenv import load_dotenv
+from urllib.parse import urlparse
+
+# Load environment variables
+load_dotenv()
+
+# Add the parent directory to the path so we can import carthooks
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 from carthooks.sdk import Client, DNSCache
+
+# Get API host from environment
+api_url = os.getenv('CARTHOOKS_API_URL')
+
+parsed_url = urlparse(api_url if api_url.startswith('http') else f'http://{api_url}')
+API_HOST = parsed_url.hostname
+TEST_URL = f"http://{API_HOST}:9000" if API_HOST == 'localhost' else f"https://{API_HOST}"
 
 def test_dns_cache_basic():
     """Test basic DNS cache functionality"""
@@ -15,13 +33,13 @@ def test_dns_cache_basic():
     
     # First resolution (should hit DNS)
     start = time.time()
-    ip1 = cache.resolve('api.carthooks.com')
+    ip1 = cache.resolve(API_HOST)
     duration1 = time.time() - start
     print(f"First resolution: {ip1} in {duration1:.3f}s")
     
     # Second resolution (should hit cache)
     start = time.time()
-    ip2 = cache.resolve('api.carthooks.com')
+    ip2 = cache.resolve(API_HOST)
     duration2 = time.time() - start
     print(f"Second resolution: {ip2} in {duration2:.3f}s (cached)")
     
@@ -46,7 +64,7 @@ def test_client_with_dns_cache():
     for i in range(10):
         try:
             start = time.time()
-            response = client.client.get('https://api.carthooks.com')
+            response = client.client.get(TEST_URL)
             duration = time.time() - start
             success_count += 1
             if i % 3 == 0:
@@ -74,7 +92,7 @@ def test_client_without_dns_cache():
     
     # Test request
     try:
-        response = client.client.get('https://api.carthooks.com')
+        response = client.client.get(TEST_URL)
         print(f"Request without cache: {response.status_code}")
     except Exception as e:
         print(f"Request failed: {e}")
@@ -93,7 +111,7 @@ def test_concurrent_dns_cache():
         for i in range(5):
             try:
                 start = time.time()
-                response = client.client.get('https://api.carthooks.com')
+                response = client.client.get(TEST_URL)
                 duration = time.time() - start
                 results.append((worker_id, i, 'SUCCESS', duration))
             except Exception as e:
@@ -128,7 +146,7 @@ def test_dns_fallback():
     cache = DNSCache(ttl=1, fallback=True)
     
     # First resolution
-    ip1 = cache.resolve('api.carthooks.com')
+    ip1 = cache.resolve(API_HOST)
     print(f"Initial resolution: {ip1}")
     
     # Wait for TTL to expire
@@ -136,7 +154,7 @@ def test_dns_fallback():
     
     # This should still work due to fallback
     try:
-        ip2 = cache.resolve('api.carthooks.com')
+        ip2 = cache.resolve(API_HOST)
         print(f"Fallback resolution: {ip2}")
         print("✅ DNS fallback test passed")
     except Exception as e:

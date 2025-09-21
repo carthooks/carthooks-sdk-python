@@ -5,6 +5,15 @@ Test script for IPv6 disable functionality
 import socket
 import time
 import os
+import sys
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Add the parent directory to the path so we can import carthooks
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
 from carthooks.sdk import Client
 
 def test_ipv6_disable():
@@ -16,9 +25,17 @@ def test_ipv6_disable():
     client = Client()
     print(f"   IPv6 enabled: {client.is_ipv6_enabled()}")
     
+    # Get API host from environment
+    api_url = os.getenv('CARTHOOKS_API_URL')
+    
+    # Extract hostname from URL
+    from urllib.parse import urlparse
+    parsed_url = urlparse(api_url if api_url.startswith('http') else f'http://{api_url}')
+    api_host = parsed_url.hostname
+    
     # Test DNS resolution after IPv6 disable
     try:
-        result = socket.getaddrinfo('api.carthooks.com', 443)
+        result = socket.getaddrinfo(api_host, 443)
         ipv4_addrs = [r[4][0] for r in result if r[0] == socket.AF_INET]
         ipv6_addrs = [r[4][0] for r in result if r[0] == socket.AF_INET6]
         print(f"   DNS resolution - IPv4: {len(ipv4_addrs)}, IPv6: {len(ipv6_addrs)}")
@@ -29,7 +46,8 @@ def test_ipv6_disable():
     
     # Test HTTP request
     try:
-        response = client.client.get('https://api.carthooks.com')
+        test_url = f"http://{api_host}:9000" if api_host == 'localhost' else f"https://{api_host}"
+        response = client.client.get(test_url)
         print(f"   HTTP request: SUCCESS {response.status_code}")
     except Exception as e:
         print(f"   HTTP request: FAILED - {e}")
@@ -43,7 +61,7 @@ def test_ipv6_disable():
     
     # Test DNS resolution with IPv6 enabled
     try:
-        result = socket.getaddrinfo('api.carthooks.com', 443)
+        result = socket.getaddrinfo(api_host, 443)
         ipv4_addrs = [r[4][0] for r in result if r[0] == socket.AF_INET]
         ipv6_addrs = [r[4][0] for r in result if r[0] == socket.AF_INET6]
         print(f"   DNS resolution - IPv4: {len(ipv4_addrs)}, IPv6: {len(ipv6_addrs)}")
@@ -72,10 +90,18 @@ def test_multiple_requests():
     print(f"IPv6 enabled: {client.is_ipv6_enabled()}")
     
     success_count = 0
+    # Get API host for testing
+    api_url = os.getenv('CARTHOOKS_API_URL')
+    
+    from urllib.parse import urlparse
+    parsed_url = urlparse(api_url if api_url.startswith('http') else f'http://{api_url}')
+    api_host = parsed_url.hostname
+    test_url = f"http://{api_host}:9000" if api_host == 'localhost' else f"https://{api_host}"
+    
     for i in range(10):
         try:
             start = time.time()
-            response = client.client.get('https://api.carthooks.com')
+            response = client.client.get(test_url)
             duration = time.time() - start
             success_count += 1
             if i % 3 == 0:

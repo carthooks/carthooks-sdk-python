@@ -6,16 +6,20 @@ Test script to examine current user information
 import os
 import sys
 import json
+from dotenv import load_dotenv
 
-# Add the current directory to the path so we can import carthooks
-sys.path.insert(0, os.path.dirname(__file__))
+# Load environment variables
+load_dotenv()
+
+# Add the parent directory to the path so we can import carthooks
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from carthooks.sdk import Client, OAuthConfig
 
-# Test configuration
-CARTHOOKS_API_URL = "http://localhost:9000/open/api"
-CLIENT_ID = "dvc-2zYAqV50BQ1kGOj"
-CLIENT_SECRET = "dvs-68b6c0560027f4bfecdf3828e37ef0117b6028e1665a062bcc7248c0f3350d8a"
+# Test configuration from environment variables
+CARTHOOKS_API_URL = os.getenv('CARTHOOKS_API_URL')
+CLIENT_ID = os.getenv('CARTHOOKS_CLIENT_ID')
+CLIENT_SECRET = os.getenv('CARTHOOKS_CLIENT_SECRET')
 
 def print_separator(title):
     """Print a separator with title"""

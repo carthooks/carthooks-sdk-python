@@ -13,12 +13,12 @@ from carthooks.sdk import Client, OAuthConfig
 
 # 获取 access token
 oauth_config = OAuthConfig(
-    client_id=os.getenv('CARTHOOKS_CLIENT_ID', '').strip('"'),
-    client_secret=os.getenv('CARTHOOKS_CLIENT_SECRET', '').strip('"'),
+    client_id=os.getenv('CARTHOOKS_CLIENT_ID').strip('"'),
+    client_secret=os.getenv('CARTHOOKS_CLIENT_SECRET').strip('"'),
     auto_refresh=True
 )
 
-os.environ['CARTHOOKS_API_URL'] = os.getenv('CARTHOOKS_API_URL', '')
+os.environ['CARTHOOKS_API_URL'] = os.getenv('CARTHOOKS_API_URL')
 
 with Client(oauth_config=oauth_config) as client:
     result = client.initialize_oauth()
