@@ -12,3 +12,4 @@ dist-ssr
 __pycache__
 *.egg-info
 build
+.env

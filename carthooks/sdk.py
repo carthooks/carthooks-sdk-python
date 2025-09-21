@@ -297,7 +297,7 @@ class Client:
         """Get items from a collection with pagination"""
         # Ensure valid token before making request
         self.ensure_valid_token()
-        
+
         options['pagination[start]'] = start
         options['pagination[limit]'] = limit
         url = f'{self.base_url}/v1/apps/{app_id}/collections/{collection_id}/items'
@@ -537,7 +537,7 @@ class Client:
         }
 
         response = self.client.post(
-            f'{self.base_url}/open/api/oauth/token',
+            f'{self.base_url}/oauth/token',
             headers=form_headers,
             data=form_data
         )
@@ -645,7 +645,7 @@ class Client:
             data['target_tenant_id'] = request.target_tenant_id
 
         response = self.client.post(
-            f'{self.base_url}/api/oauth/get-authorize-code',
+            f'{self.base_url}/../api/oauth/get-authorize-code',
             headers=self.headers,
             json=data
         )
@@ -654,7 +654,7 @@ class Client:
     def get_current_user(self) -> Result:
         """Get current user information (requires OAuth token)"""
         response = self.client.get(
-            f'{self.base_url}/open/api/v1/me',
+            f'{self.base_url}/v1/me',
             headers=self.headers
         )
         return Result(response)
