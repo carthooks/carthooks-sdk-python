@@ -610,7 +610,9 @@ class Client:
             grant_type='client_credentials',
             client_id=self.oauth_config.client_id,
             client_secret=self.oauth_config.client_secret,
-            user_access_token=user_access_token
+            user_access_token=user_access_token,
+            refresh_token=self.oauth_config.refresh_token,
+
         )
 
         return self.get_oauth_token(request)
@@ -671,8 +673,16 @@ class Client:
         if self.token_expires_at > five_minutes_from_now:
             return True
 
-        # Try to refresh token
-        result = self.refresh_oauth_token()
+        refresh_token_available = False
+        if self.oauth_config and self.oauth_config.refresh_token:
+            refresh_token_available = True
+        elif self.current_tokens and self.current_tokens.refresh_token:
+            refresh_token_available = True
+
+        if not refresh_token_available:
+            result = self.initialize_oauth()
+        else:
+            result = self.refresh_oauth_token()
         return result.success
 
     def get_current_tokens(self) -> Optional[OAuthTokens]:
